@@ -37,7 +37,16 @@ git -C "$ROOT_DIR" diff --cached --quiet || fail "Es gibt nicht committed Stagin
 
 BRANCH="$(git -C "$ROOT_DIR" branch --show-current)"
 [[ -n "$BRANCH" ]] || fail "Detached HEAD wird für Releases nicht unterstützt."
-REPO="$(cd "$ROOT_DIR" && gh repo view --json nameWithOwner --jq '.nameWithOwner')"
+ORIGIN_URL="$(git -C "$ROOT_DIR" remote get-url origin)"
+case "$ORIGIN_URL" in
+  https://github.com/*) REPO="${ORIGIN_URL#https://github.com/}" ;;
+  git@github.com:*) REPO="${ORIGIN_URL#git@github.com:}" ;;
+  ssh://git@github.com/*) REPO="${ORIGIN_URL#ssh://git@github.com/}" ;;
+  *) fail "origin muss auf ein GitHub-Repository zeigen, aktuell: $ORIGIN_URL" ;;
+esac
+REPO="${REPO%/}"
+REPO="${REPO%.git}"
+[[ "$REPO" == */* ]] || fail "Das Repository konnte nicht aus origin ermittelt werden: $ORIGIN_URL"
 
 CURRENT_VERSION="$(node --input-type=module -e "import fs from 'node:fs'; console.log(JSON.parse(fs.readFileSync(process.argv[1], 'utf8')).version)" "$PACKAGE_DIR/package.json")"
 VERSION="${1:-$CURRENT_VERSION}"
