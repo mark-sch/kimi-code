@@ -11,18 +11,18 @@ Kimi Code CLI is an AI coding agent that runs in your terminal — it can read a
 
 ## Install
 
-Install with the official script. No Node.js required.
+Install the Smartbox AI release with the installation script. No Node.js required.
 
 - **macOS or Linux**:
 
 ```sh
-curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/mark-sch/kimi-code/main/scripts/install.sh | bash
 ```
 
 - **Windows (PowerShell)**:
 
 ```powershell
-irm https://code.kimi.com/kimi-code/install.ps1 | iex
+irm https://raw.githubusercontent.com/mark-sch/kimi-code/main/scripts/install.ps1 | iex
 ```
 
 > On Windows, install [Git for Windows](https://gitforwindows.org/) before first launch because Kimi Code CLI uses the bundled Git Bash as its shell environment. If Git Bash is installed in a custom location, set `KIMI_SHELL_PATH` to the absolute path of `bash.exe`.
