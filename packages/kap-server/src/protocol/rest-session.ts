@@ -9,16 +9,14 @@ import {
 } from '@moonshot-ai/agent-core-v2/app/sessionLegacy/sessionProtocol';
 
 import { ErrorCode } from './error-codes';
-import { goalSnapshotSchema } from './goal';
-import { cursorQuerySchema, pageResponseSchema } from './pagination';
 import {
   creationOnlyProfileSchema,
   sessionActivitySchema,
-  sessionChildCreateSchema,
   sessionCreateSchema,
   sessionForkSchema,
   sessionSchema,
 } from './session';
+import { agentStateSchema } from './ws-agent';
 
 export { sessionWarningSchema, sessionWarningsResponseSchema };
 export type {
@@ -111,8 +109,20 @@ export const listSessionsQuerySchema = z
     page: z.coerce.number().int().min(1).optional(),
     before_id: z.string().min(1).optional(),
     after_id: z.string().min(1).optional(),
+    include_archive: booleanQueryParam,
+    exclude_empty: booleanQueryParam,
+    archived_only: booleanQueryParam,
+    hosts: z.literal('include').optional(),
   })
   .superRefine((value, ctx) => {
+    if (value.archived_only === true && value.include_archive === true) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'archived_only and include_archive are mutually exclusive',
+        path: ['archived_only'],
+        params: { code: ErrorCode.VALIDATION_FAILED },
+      });
+    }
     const cursorParams = [
       value.page_token !== undefined ? 'page_token' : undefined,
       value.page !== undefined ? 'page' : undefined,
@@ -212,6 +222,7 @@ export type ListSessionsQuery = z.infer<typeof listSessionsQuerySchema>;
 export const sessionIdProjectionSchema = z.object({
   id: z.string().min(1),
   archived: z.boolean(),
+  host_id: z.string().optional(),
 });
 export type SessionIdProjection = z.infer<typeof sessionIdProjectionSchema>;
 
@@ -220,6 +231,7 @@ export const listSessionsFlatResponseSchema = z.object({
   total: z.number().int().nonnegative(),
   has_more: z.boolean(),
   next_page_token: z.string().min(1).optional(),
+  unavailable_hosts: z.array(z.string()).optional(),
 });
 export type ListSessionsFlatResponse = z.infer<typeof listSessionsFlatResponseSchema>;
 
@@ -227,6 +239,7 @@ export const sessionWorkspaceGroupSchema = z.object({
   workspace_id: z.string().min(1),
   sessions: z.array(z.union([sessionSchema, sessionIdProjectionSchema])),
   total: z.number().int().nonnegative(),
+  host_id: z.string().optional(),
 });
 export type SessionWorkspaceGroup = z.infer<typeof sessionWorkspaceGroupSchema>;
 
@@ -235,6 +248,7 @@ export const listSessionsGroupedResponseSchema = z.object({
   total: z.number().int().nonnegative(),
   has_more: z.boolean(),
   next_page_token: z.string().min(1).optional(),
+  unavailable_hosts: z.array(z.string()).optional(),
 });
 export type ListSessionsGroupedResponse = z.infer<typeof listSessionsGroupedResponseSchema>;
 
@@ -297,7 +311,10 @@ export const exportSessionRequestSchema = z
   .strict();
 export type ExportSessionRequest = z.infer<typeof exportSessionRequestSchema>;
 
-export const updateSessionProfileResponseSchema = sessionSchema;
+export const updateSessionProfileResponseSchema = z.object({
+  session: sessionSchema,
+  agent: agentStateSchema,
+});
 export type UpdateSessionProfileResponse = z.infer<typeof updateSessionProfileResponseSchema>;
 
 export const updateSessionMetaRequestSchema = updateSessionProfileRequestSchema;
@@ -309,7 +326,7 @@ export type UpdateSessionMetaResponse = UpdateSessionProfileResponse;
 export const updateSessionRequestSchema = updateSessionProfileRequestSchema;
 export type UpdateSessionRequest = z.infer<typeof updateSessionRequestSchema>;
 
-export const updateSessionResponseSchema = sessionSchema;
+export const updateSessionResponseSchema = updateSessionProfileResponseSchema;
 export type UpdateSessionResponse = z.infer<typeof updateSessionResponseSchema>;
 
 export const forkSessionRequestSchema = sessionForkSchema;
@@ -322,78 +339,6 @@ export const startBtwSessionResponseSchema = z.object({
   agent_id: z.string().min(1),
 });
 export type StartBtwSessionResponse = z.infer<typeof startBtwSessionResponseSchema>;
-
-export const predictPromptRequestSchema = z.object({
-  prediction_id: z.string().min(1),
-  expected_turn_id: z.number().int().nonnegative(),
-});
-export type PredictPromptRequest = z.infer<typeof predictPromptRequestSchema>;
-
-export const predictPromptResponseSchema = z.object({
-  prediction: z.string().nullable(),
-});
-export type PredictPromptResponse = z.infer<typeof predictPromptResponseSchema>;
-
-export const cancelPromptPredictionRequestSchema = z.object({
-  prediction_id: z.string().min(1),
-  reason: z.enum([
-    'input',
-    'escape',
-    'new_turn',
-    'session',
-    'dialog',
-    'queue',
-    'submit',
-    'plan',
-    'visibility',
-    'shutdown',
-    'disconnect',
-    'activity_turn_started',
-    'activity_turn_ended',
-    'activity_background',
-    'activity_interaction',
-    'activity_agent_lifecycle',
-    'agent_will_close',
-    'agent_replaced',
-    'agent_closed',
-    'disposed',
-    'unspecified',
-  ]).optional(),
-});
-export type CancelPromptPredictionRequest = z.infer<typeof cancelPromptPredictionRequestSchema>;
-
-export const cancelPromptPredictionResponseSchema = z.object({
-  cancelled: z.boolean(),
-});
-export type CancelPromptPredictionResponse = z.infer<typeof cancelPromptPredictionResponseSchema>;
-
-export const listSessionChildrenQuerySchema = cursorQuerySchema.and(
-  z.object({
-    busy: booleanQueryParam,
-    include_archive: booleanQueryParam,
-  }),
-);
-export type ListSessionChildrenQuery = z.infer<typeof listSessionChildrenQuerySchema>;
-
-export const listSessionChildrenResponseSchema = pageResponseSchema(sessionSchema);
-export type ListSessionChildrenResponse = z.infer<typeof listSessionChildrenResponseSchema>;
-
-export const createSessionChildRequestSchema = sessionChildCreateSchema;
-export type CreateSessionChildRequest = z.infer<typeof createSessionChildRequestSchema>;
-
-export const createSessionChildResponseSchema = sessionSchema;
-export type CreateSessionChildResponse = z.infer<typeof createSessionChildResponseSchema>;
-
-export const getSessionGoalResponseSchema = goalSnapshotSchema.nullable();
-export type GetSessionGoalResponse = z.infer<typeof getSessionGoalResponseSchema>;
-
-export const editSessionGoalRequestSchema = z.object({
-  objective: z.string(),
-});
-export type EditSessionGoalRequest = z.infer<typeof editSessionGoalRequestSchema>;
-
-export const editSessionGoalResponseSchema = goalSnapshotSchema;
-export type EditSessionGoalResponse = z.infer<typeof editSessionGoalResponseSchema>;
 
 export const compactSessionRequestSchema = z.preprocess(
   (value) => value === undefined ? {} : value,
@@ -435,10 +380,21 @@ export const deleteSessionResponseSchema = z.object({
 });
 export type DeleteSessionResponse = z.infer<typeof deleteSessionResponseSchema>;
 
-export const sessionAbortResponseSchema = z.object({
-  aborted: z.boolean(),
+export const cancelSessionBodySchema = z.object({
+  agent_id: z.string().min(1).optional(),
+  include_background: z.boolean().optional(),
 });
-export type SessionAbortResponse = z.infer<typeof sessionAbortResponseSchema>;
+
+export const cancelSessionRequestSchema = z.preprocess(
+  (value) => (value === undefined ? {} : value),
+  cancelSessionBodySchema,
+);
+export type CancelSessionRequest = z.infer<typeof cancelSessionRequestSchema>;
+
+export const sessionCancelResponseSchema = z.object({
+  cancelled: z.boolean(),
+});
+export type SessionCancelResponse = z.infer<typeof sessionCancelResponseSchema>;
 
 function fitsUtf8ByteLimit(value: string, limit: number): boolean {
   let bytes = 0;
