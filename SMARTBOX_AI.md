@@ -90,7 +90,7 @@ Keine generierten Deklarationsdateien unter `packages/agent-core-v2/src/` oder `
 
 ## Native Releases und Remote-Installation
 
-`release.sh` startet den Workflow `.github/workflows/smartbox-native-release.yml` im eigenen GitHub-Fork. Der Workflow baut native Pakete für Linux x64/ARM64, Windows x64/ARM64 und macOS x64/ARM64 und veröffentlicht sie als GitHub Release. Die Binaries werden nicht in Git committed; im Repository liegen nur der Release-Ablauf und die Installer.
+`release.sh` startet den Workflow `.github/workflows/smartbox-native-release.yml` im eigenen GitHub-Fork. Der Workflow baut native Pakete für Linux x64/ARM64 und Windows x64/ARM64 und veröffentlicht sie als GitHub Release. Die Binaries werden nicht in Git committed; im Repository liegen nur der Release-Ablauf und die Installer.
 
 Voraussetzungen auf dem ausführenden Rechner:
 
@@ -113,7 +113,7 @@ Vorher die Version erhöhen und diese Versionsänderung automatisch committen:
 
 Das Skript erzeugt den Tag `smartbox-v<VERSION>`, pusht Branch und Tag zu `origin`, startet den Workflow und wartet auf dessen Abschluss. Ein bereits vorhandener Tag wird abgelehnt, damit ein Release nicht versehentlich ersetzt wird. Auf Manjaro wird die GitHub CLI bei Bedarf mit `sudo pacman -S github-cli` installiert.
 
-Nach erfolgreichem Release installieren Linux- und macOS-Benutzer die neueste Version mit:
+Nach erfolgreichem Release installieren Linux-Benutzer die neueste Version mit:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mark-sch/kimi-code/main/scripts/install.sh | bash
