@@ -7,6 +7,8 @@ dist-native/
 .local/
 coverage/
 *.tsbuildinfo
+packages/agent-core-v2/src/**/*.d.ts
+packages/agent-core-v2/test/**/*.d.ts
 .vitest-results/
 .vite/
 .DS_Store

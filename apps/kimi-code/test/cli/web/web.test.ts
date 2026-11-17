@@ -643,6 +643,7 @@ describe('`kimi web` option threading', () => {
       allowRemoteShutdown: true,
       dangerousBypassAuth: true,
       allowedHosts: ['.example.com'],
+      webTitle: 'Smartbox AI',
     });
   });
 
@@ -702,7 +703,7 @@ describe('`kimi web` option threading', () => {
     expect(calls.options).toMatchObject({ webTitle: 'My Dev Box' });
   });
 
-  it('leaves webTitle undefined when --web-title is not passed', async () => {
+  it('uses Smartbox AI when --web-title is not passed', async () => {
     const { handleWebCommand } = await import('#/cli/sub/web/run');
     const { runner, calls } = makeRunner();
     const { stdout, stderr } = makeIo();
@@ -712,7 +713,7 @@ describe('`kimi web` option threading', () => {
       { startServerForeground: runner, openUrl: vi.fn(), stdout, stderr },
     );
 
-    expect(calls.options?.webTitle).toBeUndefined();
+    expect(calls.options?.webTitle).toBe('Smartbox AI');
   });
 
   it('rejects an invalid --log-level before calling the runner', async () => {

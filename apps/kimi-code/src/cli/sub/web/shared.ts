@@ -75,7 +75,7 @@ export function parseServerOptions(opts: ServerCliOptions): ParsedServerOptions 
     allowRemoteShutdown: opts.allowRemoteShutdown === true,
     dangerousBypassAuth: opts.dangerousBypassAuth === true,
     allowedHosts: parseAllowedHostArgs(opts.allowedHost),
-    webTitle: opts.webTitle,
+    webTitle: opts.webTitle ?? 'Smartbox AI',
   };
 }
 
