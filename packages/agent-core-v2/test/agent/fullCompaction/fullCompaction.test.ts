@@ -3,8 +3,11 @@ import { appendContext } from '../contextMemory/stubs';
 import { tmpdir } from 'node:os';
 import { join } from 'pathe';
 
-import { type Message } from '@moonshot-ai/core/llm/message';
-import { type StreamedMessagePart, type ToolCall } from '@moonshot-ai/core/llm/message';
+import {
+  type Message,
+  type StreamedMessagePart,
+  type ToolCall,
+} from '@moonshot-ai/core/llm/message';
 import { resolveEndpoint } from '@moonshot-ai/core/llm/endpoint';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -20,8 +23,23 @@ import type { IExternalHooksRunnerService } from '#/features/externalHooks/app/e
 import { MASTER_ENV } from '#/app/flag/flagService';
 import { estimateTokensForMessages } from '#/llm-adapter/contract/tokens';
 import { recordingTelemetry, type TelemetryRecord } from '../../app/telemetry/stubs';
-import type { TestAgentContext, TestAgentOptions, TestAgentServiceOverride } from '../../harness';
-import { agentService, appService, appServices, createCommandRunner, execEnvServices, findGenerateCallPrefixBreak, hostEnvironmentServices, createMockProvider, providerHttpError, sessionServices, testAgent as createTestAgent, type MockProviderResponse } from '../../harness';
+import {
+  type TestAgentContext,
+  type TestAgentOptions,
+  type TestAgentServiceOverride,
+  agentService,
+  appService,
+  appServices,
+  createCommandRunner,
+  execEnvServices,
+  findGenerateCallPrefixBreak,
+  hostEnvironmentServices,
+  createMockProvider,
+  providerHttpError,
+  sessionServices,
+  testAgent as createTestAgent,
+  type MockProviderResponse,
+} from '../../harness';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 import { InMemoryStorageService } from '#/persistence/backends/memory/inMemoryStorageService';
 import { ISessionTokenCountingService } from '#/session/tokenCounting/sessionTokenCounting';
@@ -781,7 +799,7 @@ describe('FullCompaction', () => {
       return {
         parts: [{ type: 'text', text: 'Recovered compacted summary.' }],
         usage: null,
-        finishReason: null,
+        finishReason: 'completed',
       };
     });
     const ctx = testAgent({ generate });
@@ -2414,7 +2432,7 @@ describe('FullCompaction', () => {
     await ctx.expectResumeMatches();
   });
 
-  it('compacts and retries when the provider reports context overflow', async () => {
+  it('[L0:core.overflow-recovery-after-retry] compacts and retries when provider context overflow follows an earlier LLM retry', async () => {
     let callCount = 0;
     const inputs: string[][] = [];
     const generate: GenerateFn = createMockProvider(async (request, _signal) => {
@@ -2422,13 +2440,15 @@ describe('FullCompaction', () => {
       callCount += 1;
       inputs.push(inputHistorySnapshot(history));
       if (callCount === 1) {
-        return providerHttpError(400, 'Context length exceeded', { requestId: 'req-context-overflow' })
+        return providerHttpError(429, 'first attempt rate limited', { requestId: 'req-first-429', retryAfterMs: 1 });
       }
       if (callCount === 2) {
-        return textResult('Overflow compacted summary.');
+        return providerHttpError(400, 'Context length exceeded', { requestId: 'req-context-overflow' });
       }
       if (callCount === 3) {
-        
+        return textResult('Overflow compacted summary.');
+      }
+      if (callCount === 4) {
         return textResult('Recovered after overflow compaction.');
       }
       throw new Error(`Unexpected generate call ${String(callCount)}`);
@@ -2444,7 +2464,7 @@ describe('FullCompaction', () => {
     await ctx.rpc.prompt({ input: [{ type: 'text', text: 'Retry after provider overflow' }] });
     const events = await ctx.untilTurnEnd();
 
-    expect(callCount).toBe(3);
+    expect(callCount).toBe(4);
     expect(events).toContainEqual(
       expect.objectContaining({
         event: 'compaction.started',
@@ -2470,6 +2490,11 @@ describe('FullCompaction', () => {
     );
     expect(inputs).toMatchInlineSnapshot(`
       [
+        [
+          "user: old user one",
+          "assistant: old assistant one",
+          "user: Retry after provider overflow",
+        ],
         [
           "user: old user one",
           "assistant: old assistant one",

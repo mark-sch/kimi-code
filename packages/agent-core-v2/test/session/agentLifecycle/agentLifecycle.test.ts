@@ -89,7 +89,6 @@ import { IFlagService } from '#/app/flag/flag';
 import { ISessionNotify } from '#/features/notify/sessionNotify';
 import { ISessionEventBus } from '#/app/event/eventBus';
 import { EventBusService } from '#/app/event/eventBusService';
-import '#/app/event/eventBusService';
 import { TurnStarted } from '#/agent/loop/turnEvents';
 import { IAgentPluginService } from '#/agent/plugin/agentPlugin';
 import { ILogService } from '#/_base/log/log';
@@ -228,6 +227,7 @@ describe('AgentLifecycleService', () => {
   let loopCancel: ReturnType<typeof vi.fn<IAgentLoopService['cancel']>>;
   let loopSettled: ReturnType<typeof vi.fn<IAgentLoopService['settled']>>;
   let loopStart: ReturnType<typeof vi.fn<IAgentLoopService['start']>>;
+  let loopClose: ReturnType<typeof vi.fn<IAgentLoopService['close']>>;
   let loopSetProfile: ReturnType<typeof vi.fn<IAgentLoopService['setProfile']>>;
   let loopProfileSequence: ProfileBindingSnapshot[];
   let beforeExecuteListeners: number;
@@ -490,6 +490,7 @@ describe('AgentLifecycleService', () => {
       })()),
     };
     loopStart = loopStub.start;
+    loopClose = loopStub.close;
     loopSetProfile = loopStub.setProfile;
     ix.stub(IAgentLoopService, loopStub as unknown as IAgentLoopService);
     ix.stub(ITelemetryService, {
@@ -771,8 +772,10 @@ describe('AgentLifecycleService', () => {
     }
   });
 
-  it('create failure after scope creation keeps the context active through async teardown', async () => {
-    registerAgent.mockRejectedValueOnce(new Error('boom'));
+  it('create and close failures after scope creation keep the context active through async teardown', async () => {
+    const failure = new Error('boom');
+    loopStart.mockRejectedValueOnce(failure);
+    loopClose.mockRejectedValueOnce(failure);
     const svc = ix.get(IAgentLifecycleService);
     const bus = ix.get(ISessionEventBus);
     const seen: string[] = [];
@@ -808,7 +811,7 @@ describe('AgentLifecycleService', () => {
     };
     process.on('unhandledRejection', onUnhandled);
     try {
-      await expect(svc.create({ agentId: 'main' })).rejects.toThrow('boom');
+      await expect(svc.create({ agentId: 'main' })).rejects.toBe(failure);
       expect(seen).toEqual(['delivered']);
       expect(unhandled).toEqual([]);
     } finally {
@@ -880,8 +883,10 @@ describe('AgentLifecycleService', () => {
     });
     loopSettled.mockImplementationOnce(() => {
       markDrainStarted();
-      return new Promise<void>((resolve) => {
-        releaseDrain = resolve;
+      return new Promise<undefined>((resolve) => {
+        releaseDrain = () => {
+          resolve(undefined);
+        };
       });
     });
     const svc = ix.get(IAgentLifecycleService);
@@ -905,7 +910,7 @@ describe('AgentLifecycleService', () => {
     const main = await svc.create({ agentId: 'main' });
     const disposed: string[] = [];
     disposables.add(svc.onDidClose((agent) => disposed.push(agent.agentId)));
-    loopSettled.mockImplementation(() => new Promise<void>(() => {}));
+    loopSettled.mockImplementation(() => new Promise<undefined>(() => {}));
     vi.useFakeTimers();
     try {
       const removal = svc.remove(main);

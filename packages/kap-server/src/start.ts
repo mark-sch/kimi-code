@@ -117,6 +117,7 @@ export interface ServerStartOptions {
   readonly pluginMarketplaceUrl?: string;
   readonly configPath?: string;
   readonly instancesDir?: string;
+  readonly skipInstanceRegistry?: boolean;
   readonly logLevel?: ServerLogLevel;
   readonly logger?: ServerLogger;
   readonly debugEndpoints?: boolean;
@@ -163,7 +164,7 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
   const idleReclaimMs = resolveSessionIdleReclaimMs(opts.env ?? process.env);
   const disableAuth = opts.disableAuth === true || opts.socketPath !== undefined;
   const registration: InstanceRegistration =
-    opts.socketPath !== undefined
+    opts.socketPath !== undefined || opts.skipInstanceRegistry === true
       ? { serverId: 'socket', update: async () => {}, release: async () => {} }
       : await createInstanceRegistry({
           instancesDir: opts.instancesDir ?? join(homeDir, 'server', 'instances'),
@@ -173,6 +174,7 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
           port,
           startedAt: Date.now(),
           serverVersion,
+          product: opts.hostIdentity.productName,
         });
   const exposureClass = classify(host, { bindClass: opts.bindClass });
   if (exposureClass !== 'loopback' && opts.insecureNoTls !== true) {
@@ -460,13 +462,11 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
 
   const configService = core.accessor.get(IConfigService);
   const publishConfigWarnings = (diagnostics: readonly ConfigDiagnostic[]): void => {
-    const warnings: ConfigWarningItem[] = diagnostics
-      .filter((diagnostic) => diagnostic.severity === 'warning')
-      .map((diagnostic) =>
-        diagnostic.domain === undefined
-          ? { message: diagnostic.message }
-          : { domain: diagnostic.domain, message: diagnostic.message },
-      );
+    const warnings: ConfigWarningItem[] = diagnostics.map((diagnostic) =>
+      diagnostic.domain === undefined
+        ? { message: diagnostic.message }
+        : { domain: diagnostic.domain, message: diagnostic.message },
+    );
     core.accessor.get(IEventService).publish(new ConfigWarning({ payload: { warnings } }));
   };
   const configWarningSubscription = configService.onDidChangeDiagnostics(publishConfigWarnings);
@@ -486,7 +486,7 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
   });
   void configService.ready
     .then(() => {
-      if (configService.diagnostics().some((diagnostic) => diagnostic.severity === 'warning')) {
+      if (configService.diagnostics().length > 0) {
         publishConfigWarnings(configService.diagnostics());
       }
     })
@@ -534,6 +534,7 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
   await registerOpenApi();
 
   await registerApiV1Routes(app, core, {
+    serverId: registration.serverId,
     serverVersion,
     hostIdentity: opts.hostIdentity,
     debugEndpoints,

@@ -9,7 +9,7 @@ import type {
   ToolBatchStartingEvent,
 } from '@moonshot-ai/core/loop/index';
 import { createMockProviderRequester, type MockProviderResponse } from '../../../harness/scripted-generate';
-import { createTestLoop as createLoop } from './factory';
+import { createTestLoop as createLoop, loopHookRegistry } from './factory';
 import type { LoopToolContext } from '@moonshot-ai/core/loop/create-loop';
 import type { ToolExecuteContext, ToolExecutorHook, ToolReturn } from '#/tool/executor';
 import { executorFrom, successfulExecutor } from './executor';
@@ -496,12 +496,12 @@ describe('hook failure policies', () => {
     const failed = events.filter((event) => event.type === 'hook.failed');
     expect(failed).toHaveLength(1);
     expect(failed[0]).toMatchObject({ point: 'step.starting', hookId: 'flaky', paused: true });
-    expect(loop.hooks.list().find((hook) => hook.id === 'flaky')?.paused).toBe(true);
+    expect(loopHookRegistry(loop).list().find((hook) => hook.id === 'flaky')?.paused).toBe(true);
     expect(generates).toBe(2);
     await loop.close();
   });
 
-  it('converts a throwing step.starting hook with the block policy into a blocked turn', async () => {
+  it('converts throwing step hooks with the block policy into blocked turns', async () => {
     let thrown = false;
     const scripted = requester([done('after')]);
     const events: LoopEmitted[] = [];
@@ -534,6 +534,36 @@ describe('hook failure policies', () => {
     expect(failed).toHaveLength(1);
     expect(failed[0]).toMatchObject({ point: 'step.starting', hookId: 'strict', paused: false });
     await loop.close();
+
+    let stopThrown = false;
+    const stoppingEvents: LoopEmitted[] = [];
+    const stoppingLoop = createLoop({
+      requester: requester([done('before stop'), done('after notification')]),
+      executor: successfulExecutor(['lookup', 'alpha', 'beta', 'work'], ''),
+      hooks: [
+        {
+          point: 'step.stopping',
+          id: 'strict-stopping',
+          onFailure: 'block',
+          hook: () => {
+            if (stopThrown) return;
+            stopThrown = true;
+            throw new Error('stop');
+          },
+        },
+      ],
+    });
+    stoppingLoop.subscribe((event) => stoppingEvents.push(event));
+    const stoppingFollowup = once(stoppingLoop, (event) => event.type === 'turn.ended' && event.turnId === 1);
+    const stoppingOutcome = await stoppingLoop.runTurn(prompt('hello'));
+    expect(stoppingOutcome).toEqual({
+      type: 'blocked',
+      at: 'step.stopping',
+      cause: { by: 'strict-stopping', reason: 'hook_failed', message: '[hook failed] step.stopping: stop' },
+    });
+    await stoppingFollowup;
+    expect(stoppingEvents.filter((event) => event.type === 'hook.failed')).toHaveLength(1);
+    await stoppingLoop.close();
   });
 
   it('applies a tool.batch-starting block-policy failure to every call', async () => {
@@ -624,7 +654,7 @@ describe('notify turn handoff', () => {
     await resetting;
     loop.start();
     await afterReset;
-    expect(loop.hooks.list()).toHaveLength(1);
+    expect(loopHookRegistry(loop).list()).toHaveLength(1);
     expect(events.filter((event) => event.type === 'step.started').map((event) => [event.turnId, event.step])).toEqual([
       [0, 1],
       [1, 1],
@@ -670,7 +700,7 @@ describe('notify turn handoff', () => {
     const followup = once(loop, (event) => event.type === 'turn.ended' && event.turnId === 2);
     expect((await loop.runTurn(prompt('work'))).type).toBe('done');
     await followup;
-    expect(starting).toEqual([0, 1, 2]);
+    expect(starting).toEqual([0, 2]);
     expect(events.find((event) => event.type === 'prompt.steered')).toMatchObject({
       promptIds: ['first', 'second'],
       messages: [first, second],
@@ -715,30 +745,121 @@ describe('notify turn handoff', () => {
     await loop.close();
   });
 
-  it('does not run another step of an interrupted turn when notify is pending', async () => {
+  it('resumes interrupted and queued turns before a prompt-only notification', async () => {
     const events: LoopEmitted[] = [];
-    const scripted = requester([done('new turn')]);
+    const starting: number[] = [];
+    const scripted = requester([done('queued')]);
     const loop = createLoop({
       requester: scripted,
       executor: createExecutor({}),
+      hooks: [{ point: 'step.starting', hook: (event) => { starting.push(event.turnId) } }],
       input: {
         messages: [prompt('old')],
-        inbox: { notify: [prompt('wake')] },
+        inbox: { normal: [prompt('queued')] },
         nextTurnId: 1,
         unfinished: { turnId: 0, trigger: 'normal', step: 1, stepUnfinished: true, appended: true },
       },
     });
     loop.subscribe((event) => events.push(event));
-    const followup = once(loop, (event) => event.type === 'turn.ended' && event.turnId === 1);
-    loop.continue();
+    loop.recordNotification(prompt('wake'));
+    const followup = once(loop, (event) => event.type === 'turn.ended' && event.turnId === 2);
+    loop.resume();
     await followup;
     expect(events.find((event) => event.type === 'turn.resumed')).toMatchObject({ turnId: 0, step: 1 });
     expect(events.find((event) => event.type === 'turn.ended' && event.turnId === 0)).toMatchObject({
       outcome: { type: 'done', cause: { by: 'loop', reason: 'notify' } },
     });
+    expect(events.filter((event) => event.type === 'turn.started').map((event) => [event.turnId, event.trigger])).toEqual([
+      [1, 'normal'],
+      [2, 'notify'],
+    ]);
     expect(events.filter((event) => event.type === 'step.started').map((event) => [event.turnId, event.step])).toEqual([
       [1, 1],
     ]);
+    expect(starting).toEqual([1]);
+    expect(events.find((event) => event.type === 'turn.ended' && event.turnId === 2)).toMatchObject({
+      outcome: { type: 'done', cause: { by: 'loop', reason: 'prompt_only' } },
+    });
+    await loop.close();
+
+    const ordinaryEvents: LoopEmitted[] = [];
+    const ordinary = createLoop({
+      requester: requester([done('ordinary')]),
+      executor: createExecutor({}),
+      input: { inbox: { normal: [prompt('queued')] } },
+    });
+    ordinary.subscribe((event) => ordinaryEvents.push(event));
+    ordinary.notify(prompt('ordinary'));
+    const ordinaryEnded = once(ordinary, (event) => event.type === 'turn.ended' && event.turnId === 1);
+    ordinary.start();
+    await ordinaryEnded;
+    expect(ordinaryEvents.filter((event) => event.type === 'step.started').map((event) => [event.turnId, event.step])).toEqual([
+      [1, 1],
+    ]);
+    expect(ordinaryEvents.find((event) => event.type === 'turn.ended' && event.turnId === 0)).toMatchObject({
+      outcome: { type: 'done', cause: { by: 'loop', reason: 'prompt_only' } },
+    });
+    await ordinary.close();
+
+    const executableEvents: LoopEmitted[] = [];
+    const executable = createLoop({
+      requester: requester([done('ordinary')]),
+      executor: createExecutor({}),
+      input: { inbox: { notify: [prompt('ordinary')] } },
+    });
+    executable.subscribe((event) => executableEvents.push(event));
+    executable.recordNotification(prompt('restored'));
+    const executableEnded = once(executable, (event) => event.type === 'turn.ended' && event.turnId === 1);
+    executable.start();
+    await executableEnded;
+    expect(executableEvents.filter((event) => event.type === 'step.started').map((event) => [event.turnId, event.step])).toEqual([
+      [0, 1],
+    ]);
+    expect(executableEvents.find((event) => event.type === 'turn.ended' && event.turnId === 1)).toMatchObject({
+      outcome: { type: 'done', cause: { by: 'loop', reason: 'prompt_only' } },
+    });
+    await executable.close();
+  });
+
+  it('interrupts an in-flight text response for sendNow and consumes it in a new turn', async () => {
+    const events: LoopEmitted[] = [];
+    let calls = 0;
+    let firstSignal: AbortSignal | undefined;
+    const scripted = createMockProviderRequester((_request, signal) => {
+      calls += 1;
+      if (calls > 1) return done('notified');
+      firstSignal = signal;
+      return {
+        parts: [{ type: 'text', text: 'partial' }],
+        error: new Promise<never>((_resolve, reject) => {
+          signal.addEventListener('abort', () => {
+            reject(signal.reason instanceof Error ? signal.reason : new Error(String(signal.reason)));
+          }, { once: true });
+        }),
+      };
+    });
+    const loop = createLoop({
+      requester: scripted,
+      executor: createExecutor({}),
+    });
+    loop.subscribe((event) => events.push(event));
+    const firstRequest = once(loop, (event) => event.type === 'llm.delta.part');
+    const followup = once(loop, (event) => event.type === 'turn.ended' && event.turnId === 1);
+    const first = loop.runTurn(prompt('work'));
+    await firstRequest;
+
+    loop.sendNow(prompt('new input'));
+
+    expect(await first).toMatchObject({ type: 'done', cause: { by: 'loop', reason: 'steered' } });
+    await followup;
+    expect(firstSignal?.aborted).toBe(true);
+    expect(calls).toBe(2);
+    expect(events.filter((event) => event.type === 'turn.started').map((event) => event.turnId)).toEqual([0, 1]);
+    expect(events.find((event) => event.type === 'message.appended' && event.source === 'notify')).toMatchObject({
+      turnId: 1,
+      step: 0,
+      message: prompt('new input'),
+    });
     await loop.close();
   });
 });

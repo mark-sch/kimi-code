@@ -21,7 +21,7 @@ import type { IAgentStateService } from '#/agent/state/agentState';
 import type { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import type { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { legacyToolDurationMs } from '#/tool/executor';
-import type { AgentLoopService } from './loopService';
+import type { AgentLoopService, LoopInterruptReason } from './loopService';
 import type { AgentPromptProjection, ActivePrompt, PendingTurn } from './promptProjection';
 import {
   MAX_STEPS_REASON,
@@ -70,7 +70,6 @@ import type {
 } from './loop';
 import { createMaxStepsExceededError, isMaxStepsExceededError } from './loop';
 import { isUserPromptSubmitHookPart } from '#/agent/contextMemory/hookParts';
-import type { LoopInterruptReason } from './loopService';
 
 export const loopLastRequestIdKey = defineState<string | undefined>(
   'loop.lastRequestId',
@@ -251,7 +250,7 @@ export class AgentTurnProjection {
     const current = active?.current;
     const retry = active?.retry;
     return {
-      state: loop?.state.turn === undefined && active === undefined ? 'idle' : 'running',
+      state: loop?.state.status === 'running' || active !== undefined ? 'running' : 'idle',
       activeTurnId: loop?.state.turn?.id ?? active?.id,
       activePromptId: this.options.prompts.activePrompt()?.id,
       queue,
@@ -522,20 +521,23 @@ export class AgentTurnProjection {
         }));
         return;
       }
-      case 'llm.sent': {
+      case 'llm.requested': {
         const turn = this.active;
-        if (turn === undefined || turn.retry === undefined) return;
-        const step = turn.current?.number ?? turn.gatedSteps;
+        if (turn === undefined || (turn.retry === undefined && turn.current !== undefined)) return;
+        const stepNumber = turn.current?.number ?? turn.gatedSteps;
+        const step = createStepState(stepNumber, turn.controller.signal, turn.stepIds.get(stepNumber));
+        turn.current = step;
+        turn.stepIds.set(step.number, step.uuid);
         turn.retry = undefined;
         void this.options.dispatcher.dispatch(new TurnStepStarted({
           agentId: this.options.scopeContext.agentId,
           turnId: turn.id,
-          step,
-          stepId: turn.current?.uuid ?? turn.stepIds.get(step),
+          step: step.number,
+          stepId: step.uuid,
         }));
         return;
       }
-      case 'llm.streaming.part': {
+      case 'llm.delta.part': {
         const turn = this.active;
         if (turn === undefined) return;
         const part = event.part;
@@ -576,12 +578,12 @@ export class AgentTurnProjection {
             return;
         }
       }
-      case 'llm.streaming.usage': {
+      case 'llm.delta.usage': {
         const step = this.active?.current;
         if (step !== undefined) step.usage = mergeUsage(step.usage, event.usage);
         return;
       }
-      case 'llm.streaming.finish': {
+      case 'llm.delta.finish': {
         const step = this.active?.current;
         if (step !== undefined) {
           step.providerFinishReason = event.finish.finishReason ?? undefined;
@@ -589,15 +591,23 @@ export class AgentTurnProjection {
         }
         return;
       }
-      case 'llm.streaming.message_id': {
+      case 'llm.delta.message_id': {
         const step = this.active?.current;
         if (step !== undefined) step.messageId = event.messageId;
         return;
       }
-      case 'llm.retrying': {
+      case 'llm.retry': {
         const turn = this.active;
         if (turn === undefined) return;
         const step = turn.current;
+        if (step !== undefined) {
+          void this.options.dispatcher.dispatch(new TurnStepStreamReset({
+            agentId: this.options.scopeContext.agentId,
+            turnId: turn.id,
+            step: step.number,
+            stepId: step.uuid,
+          }));
+        }
         if (event.reason === 'recovery') {
           turn.current = undefined;
           return;
@@ -611,14 +621,6 @@ export class AgentTurnProjection {
           errorName: fields.errorName,
           statusCode: fields.statusCode,
         };
-        if (step !== undefined) {
-          void this.options.dispatcher.dispatch(new TurnStepStreamReset({
-            agentId: this.options.scopeContext.agentId,
-            turnId: turn.id,
-            step: step.number,
-            stepId: step.uuid,
-          }));
-        }
         void this.options.dispatcher.dispatch(new TurnStepRetrying({
           agentId: this.options.scopeContext.agentId,
           turnId: turn.id,
@@ -1024,8 +1026,8 @@ export class AgentTurnProjection {
   }
 }
 
-function createStepState(number: number, signal: AbortSignal): CoreStepState {
-  return { number, uuid: randomUUID(), signal, pendingToolIds: new Set(), tools: [] };
+function createStepState(number: number, signal: AbortSignal, uuid: string = randomUUID()): CoreStepState {
+  return { number, uuid, signal, pendingToolIds: new Set(), tools: [] };
 }
 
 function mergeUsage(base: TokenUsage | undefined, patch: Partial<TokenUsage>): TokenUsage {

@@ -1,16 +1,18 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
 
 import { describe, expect, it, vi } from 'vitest';
 
 import { ErrorCode } from '../src/protocol/error-codes';
 
-import { listSessionsAcrossHosts, type SessionsListOutcome } from '../src/routes/sessionsAcrossHosts';
+import { listAllSessionsAcrossHosts, listSessionsAcrossHosts, type SessionsListOutcome } from '../src/routes/sessionsAcrossHosts';
 import type { ListSessionsQuery } from '../src/protocol/rest-session';
 import { HostBridgeManager } from '../src/services/hosts/hostBridgeManager';
-import { HostSourceError, type HostSources } from '../src/services/hosts/hostFanout';
+import { collectFromHosts, hostProjects, HostSourceError, type HostSources } from '../src/services/hosts/hostFanout';
 import type { HostHttpRequest, HostSession } from '../src/services/hosts/hostSession';
+import { StdioHostSession } from '../src/services/hosts/stdioHostSession';
 import { startServer } from '../src/start';
 import { TEST_HOST_IDENTITY } from './helpers/hostIdentity';
 
@@ -124,7 +126,7 @@ function localList(sessions: FakeSession[]): (query: Omit<ListSessionsQuery, 'ho
 }
 
 function sourcesOf(hosts: Array<{ id: string; session: HostSession | undefined }>): HostSources {
-  return { sources: () => hosts };
+  return { sources: () => hosts.map(({ id, session }) => ({ id, getSession: async () => session })) };
 }
 
 function ids(data: unknown): string[] {
@@ -213,9 +215,29 @@ describe('sessions across hosts', () => {
     expect(requests.filter((path) => path.startsWith('/api/v1/sessions'))).toEqual([]);
   });
 
+  it('forwards the text query to the local listing and every host', async () => {
+    const requests: string[] = [];
+    const localQueries: Array<Omit<ListSessionsQuery, 'hosts'>> = [];
+    const hosts = sourcesOf([{ id: 'dev', session: fakeHost(projects, remote, requests) }]);
+    const outcome = await listSessionsAcrossHosts(
+      { hosts: 'include', page_size: 50, query: 'login' } as ListSessionsQuery,
+      hosts,
+      (query) => {
+        localQueries.push(query);
+        return localList(local)(query);
+      },
+    );
+
+    expect(outcome.ok).toBe(true);
+    expect(localQueries.map((query) => query.query)).toEqual(['login']);
+    const hostListings = requests.filter((path) => path.startsWith('/api/v1/sessions'));
+    expect(hostListings).not.toEqual([]);
+    expect(hostListings.map((path) => parseQuery(path).query['query'])).toEqual(hostListings.map(() => 'login'));
+  });
+
   it('reports hosts that are offline or failing and still answers with the rest', async () => {
-    const failing = { ...hosts.sources()[0]!.session!, request: async () => { throw new Error('tunnel closed'); } };
-    const unavailableHosts = sourcesOf([{ id: 'off', session: undefined }, { id: 'broken', session: failing }, ...hosts.sources()]);
+    const failing = { ...session, request: async () => { throw new Error('tunnel closed'); } };
+    const unavailableHosts = sourcesOf([{ id: 'off', session: undefined }, { id: 'broken', session: failing }, { id: 'dev', session }]);
 
     const page = await list({ page_size: 50 }, unavailableHosts, local);
 
@@ -286,6 +308,28 @@ describe('sessions across hosts', () => {
     }
   });
 
+  it('sorts all unpaginated sessions by the requested timestamp before projecting ids', async () => {
+    const local = [{ id: 'l1', workspace: 'wd_local', updated: 90 }];
+    const remote = [
+      { id: 'r1', workspace: 'wm_dev', updated: 100 },
+      { id: 'r2', workspace: 'wm_dev', updated: 80 },
+    ];
+    const hosts = sourcesOf([{ id: 'dev', session: fakeHost(projects, remote) }]);
+    const all = async (query: Partial<ListSessionsQuery>) => {
+      const outcome = await listAllSessionsAcrossHosts({ view: 'flat', sort: 'updated_at_desc', ...query }, hosts, localList(local));
+      if (!outcome.ok) throw new Error(outcome.message);
+      return outcome.data as Record<string, unknown>;
+    };
+    const page = await all({ fields: 'id,archived', sort: 'updated_at_asc' });
+    expect(ids(page)).toEqual(['r2', 'l1', 'r1']);
+    expect(page['items']).toEqual(expect.arrayContaining([
+      { id: 'r1', archived: false, host_id: 'dev' },
+      { id: 'l1', archived: false },
+    ]));
+    expect(ids(await all({ sort: 'created_at_desc' }))).toEqual(['l1', 'r1', 'r2']);
+    expect(ids(await all({}))).toEqual(['r1', 'l1', 'r2']);
+  });
+
   it('rejects stale tokens and reports an unavailable source during a continuation', async () => {
     const first = await list({ page_size: 2 }, sourcesOf([{ id: 'dev', session }]), local);
     const token = first['next_page_token'] as string;
@@ -312,6 +356,38 @@ describe('sessions across hosts', () => {
 });
 
 describe('projects across hosts', () => {
+  it('returns projects and session groups within five seconds even if an SSH host stops answering', async () => {
+    vi.useFakeTimers();
+    const transport = new PassThrough();
+    const stalled = new StdioHostSession(transport);
+    const project = { id: 'wm_healthy', kind: 'managed' } as const;
+    const hosts = sourcesOf([
+      { id: 'healthy', session: fakeHost([project], [{ id: 'remote', workspace: project.id, updated: 10 }]) },
+      { id: 'stalled', session: stalled },
+    ]);
+    const onProjects = vi.fn();
+    const onGroups = vi.fn();
+    try {
+      void collectFromHosts(hosts, hostProjects).then(onProjects);
+      void list({ view: 'by_workspace' }, hosts, [{ id: 'local', workspace: 'wm_local', updated: 20 }]).then(onGroups);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(onProjects).toHaveBeenCalledWith({
+        items: [{ ...project, host_id: 'healthy' }],
+        unavailable: ['stalled'],
+      });
+      expect(onGroups).toHaveBeenCalledWith(expect.objectContaining({
+        groups: [expect.objectContaining({ workspace_id: 'wm_local' }), expect.objectContaining({ workspace_id: project.id })],
+        unavailable_hosts: ['stalled'],
+      }));
+    } finally {
+      stalled.close();
+      transport.destroy();
+      vi.useRealTimers();
+    }
+  });
+
   it('adds each host\'s app-created projects and names the hosts that cannot answer', async () => {
     const home = await mkdtemp(join(tmpdir(), 'kimi-host-projects-'));
     const project = {
@@ -361,6 +437,7 @@ function sessionHost(projects: FakeProject[], sessions: Array<Record<string, unk
           id: String(session['id']),
           workspace: String(session['workspace_id']),
           updated: Date.parse(String(session['updated_at'])),
+          archived: session['archived'] === true,
         }));
         return reply(200, { code: 0, msg: 'success', data: serve(fake, query) });
       }
@@ -414,6 +491,13 @@ describe('v1 sessions across hosts', () => {
       expect(archived.get('archived_only')).toBe('true');
       expect(archived.getAll('workspace_id')).toEqual(['wm_dev']);
       expect(Number(archived.get('page_size'))).toBeLessThanOrEqual(100);
+
+      const projected = await call('/api/v1/sessions?hosts=include&fields=id,archived');
+      expect(projected).toMatchObject({ code: 0, data: { has_more: false } });
+      expect(projected.data['items']).toEqual(expect.arrayContaining([
+        { id: remoteId, archived: false, host_id: 'dev' },
+        { id: local['id'], archived: false },
+      ]));
 
       expect((await call(`/api/v1/sessions/${remoteId}`)).code).toBe(40401);
       expect(await call(`/api/v1/sessions/${remoteId}?hosts=include`)).toMatchObject({ code: 0, data: { id: remoteId, host_id: 'dev' } });
