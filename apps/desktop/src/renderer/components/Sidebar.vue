@@ -363,7 +363,7 @@ function onLogoClick(): void {
               <path d="M 28.9734 0 C 30.2364 0 31.2604 1.0239 31.2604 2.287 C 31.2604 3.55 30.2364 4.574 28.9734 4.574 L 26.9555 4.574 C 26.8068 4.574 26.6864 4.4535 26.6864 4.3049 L 26.6864 2.287 C 26.6864 1.0239 27.7103 0 28.9734 0 Z" fill="#1783FF" />
             </svg>
             <!-- brand-mark:end -->
-            <span class="ch-name">Kimi Code</span>
+            <span class="ch-name">Smartbox AI</span>
             <Pill
               v-if="isDev"
               class="ch-backend"

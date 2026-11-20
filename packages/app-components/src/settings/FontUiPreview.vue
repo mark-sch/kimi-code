@@ -101,7 +101,7 @@ onBeforeUnmount(() => observer?.disconnect());
           <div v-else-if="chrome === 'plain'" class="fup-ch">
             <span class="fup-ch-brand">
               <component :is="brand" v-if="brand" :size="22" variant="theme" />
-              <span class="fup-ch-name">Kimi Code</span>
+              <span class="fup-ch-name">Smartbox AI</span>
             </span>
             <IconButton size="sm"><Icon name="panel-collapse" /></IconButton>
           </div>
