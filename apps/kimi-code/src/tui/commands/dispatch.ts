@@ -26,6 +26,7 @@ import type {
 } from '../types';
 import { formatErrorMessage } from '../utils/event-payload';
 import type { ExtractionResult } from '../utils/image-placeholder';
+import { hasUnavailableSessionModel } from '../utils/model-switch';
 import { handleLoginCommand, handleLogoutCommand } from './auth';
 import { handleBtwCommand } from './btw';
 import { handleCopyCommand } from './copy';
@@ -169,6 +170,9 @@ export interface SlashCommandHost {
   setExitForegroundTask(task: (exitCode: number) => Promise<void>): void;
   showHelpPanel(): void;
   createNewSession(): Promise<void>;
+  environmentForNewSession(): Promise<
+    { readonly environmentId: string; readonly environmentCwd?: string } | undefined
+  >;
   showSessionPicker(): Promise<void>;
   sendNormalUserInput(text: string, preExtracted?: ExtractionResult, delivery?: FollowUpDelivery): void;
   sendInlineSkillUserInput(
@@ -258,6 +262,7 @@ async function executeSlashCommand(
         host.showError(LLM_NOT_SET_MESSAGE);
         return;
       }
+      if (hasUnavailableSessionModel(host)) return;
       let session = host.session;
       if (session === undefined) {
         session = await ensureSessionForCommand(host);
