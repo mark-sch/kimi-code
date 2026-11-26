@@ -352,6 +352,12 @@ onActivated(() => {
     if (document.activeElement === document.body) feedbackRef.value?.el?.focus({ preventScroll: true });
   });
 });
+function reviewTitle(review: NonNullable<ApprovalBlock['review']>): string {
+  if (review.outcome === 'failed') return t('approval.reviewFailed');
+  const risk = t(`approval.reviewRisk.${review.risk ?? 'medium'}`);
+  return t('approval.reviewDenied', { risk });
+}
+
 onUpdated(updateScrollSeams);
 </script>
 
@@ -387,7 +393,12 @@ onUpdated(updateScrollSeams);
     </div>
 
     <div v-if="paneMounted" ref="paneEl" class="apane" :inert="minimized">
-      <div class="ab">
+      <div class="ab" :class="{ 'has-feedback': feedbackOpen }">
+        <div v-if="block.review" class="review-detail">
+          <div class="review-title">{{ reviewTitle(block.review) }}</div>
+          <div class="review-body">{{ block.review.reason }}</div>
+        </div>
+
         <Tooltip v-if="block.kind === 'plan_review' && block.path" :text="block.path">
           <button
             type="button"
@@ -637,8 +648,10 @@ onUpdated(updateScrollSeams);
   min-height: 0;
   padding: var(--space-2) var(--space-4) 0;
 }
+.ab.has-feedback { overflow: hidden auto; }
 .ab > * { flex: 0 1 auto; min-height: 0; }
-.ab > .plan-path { flex: none; }
+.ab > .plan-path,
+.ab > .feedback-wrap { flex: none; }
 .ab > .body-plan-wrap { flex: 1; }
 
 .plan-path {
@@ -703,18 +716,32 @@ onUpdated(updateScrollSeams);
   color: var(--color-text-faint);
   margin-top: var(--space-2);
 }
-.shell-danger {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  margin-top: var(--space-2);
+.shell-danger,
+.review-detail {
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-md);
   color: var(--color-danger);
   font: var(--text-sm)/var(--leading-normal) var(--font-ui);
   background: var(--color-danger-soft);
 }
+.shell-danger {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
 .shell-danger-ic { flex: none; }
+.review-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: var(--space-2);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.review-title {
+  font-weight: var(--weight-medium);
+}
 
 .body-fields {
   display: flex;

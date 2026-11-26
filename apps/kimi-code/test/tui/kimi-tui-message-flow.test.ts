@@ -67,6 +67,7 @@ import {
   TRANSCRIPT_MAX_TURNS,
 } from '#/tui/utils/transcript-window';
 import { BtwPanelComponent } from '#/tui/components/panes/btw-panel';
+import { ReadGroupComponent } from '#/tui/components/messages/read-group';
 import { ThinkingComponent } from '#/tui/components/messages/thinking';
 import { WelcomeComponent } from '#/tui/components/chrome/welcome';
 import { ModelSelectorComponent } from '#/tui/components/dialogs/model-selector';
@@ -1093,6 +1094,64 @@ describe('KimiTUI message flow', () => {
     }
   });
 
+  it('keeps skill variants aligned with editor recall when non-adjacent prompts repeat', async () => {
+    const session = makeSession({ id: 'ses-lazy' });
+    const pathA = '/work/A/review/SKILL.md';
+    const pathB = '/work/B/review/SKILL.md';
+    const { driver } = await makeDriver(session, {
+      listWorkspaceSkills: vi.fn(async () => [
+        { name: 'review', description: 'Review skill', path: pathA, source: 'project', workspaceDir: '/work/A' },
+        { name: 'review', description: 'Review skill', path: pathB, source: 'project', workspaceDir: '/work/B' },
+      ]),
+      listPluginCommands: vi.fn(async () => []),
+    });
+    await (driver as unknown as { refreshSkillCommands(): Promise<void> }).refreshSkillCommands();
+    driver.persistInputHistory = Object.getPrototypeOf(driver).persistInputHistory;
+    const { mkdtemp, rm } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('pathe');
+    const home = await mkdtemp(join(tmpdir(), 'kimi-skill-history-dedupe-'));
+    const previousHome = process.env['KIMI_CODE_HOME'];
+    process.env['KIMI_CODE_HOME'] = home;
+    try {
+      driver.restoreInputText('/skill:review alpha', [{ skillName: 'review', path: pathA, start: 0 }]);
+      await driver.persistInputHistory('/skill:review alpha');
+      await driver.persistInputHistory('repeat me');
+      driver.restoreInputText('/skill:review beta', [{ skillName: 'review', path: pathB, start: 0 }]);
+      await driver.persistInputHistory('/skill:review beta');
+      await driver.persistInputHistory('repeat me');
+
+      driver.state.editor.clearHistory();
+      (driver as unknown as { inputHistoryEntries: unknown[] }).inputHistoryEntries = [];
+      driver.restoreInputText('');
+      await (driver as unknown as { loadPersistedInputHistory(): Promise<void> }).loadPersistedInputHistory();
+
+      driver.state.editor.handleInput('\u001B[A');
+      expect(driver.state.editor.getText()).toBe('repeat me');
+      expect(driver.skillVariantPathForCommand('skill:review', 0)).toBeUndefined();
+
+      driver.state.editor.handleInput('\u001B[A');
+      expect(driver.state.editor.getText()).toBe('/skill:review beta');
+      expect(driver.skillVariantPathForCommand('skill:review', 0)).toBe(pathB);
+
+      driver.state.editor.handleInput('\u001B[A');
+      expect(driver.state.editor.getText()).toBe('/skill:review alpha');
+      expect(driver.skillVariantPathForCommand('skill:review', 0)).toBe(pathA);
+
+      driver.state.editor.handleInput('\u001B[B');
+      expect(driver.state.editor.getText()).toBe('/skill:review beta');
+      expect(driver.skillVariantPathForCommand('skill:review', 0)).toBe(pathB);
+
+      driver.state.editor.handleInput('\u001B[B');
+      expect(driver.state.editor.getText()).toBe('repeat me');
+      expect(driver.skillVariantPathForCommand('skill:review', 0)).toBeUndefined();
+    } finally {
+      if (previousHome === undefined) delete process.env['KIMI_CODE_HOME'];
+      else process.env['KIMI_CODE_HOME'] = previousHome;
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   it('keeps both variants through queue recall and invalidates edited positions', async () => {
     const session = makeSession({ id: 'ses-lazy' });
     const { driver } = await makeDriver(session, {
@@ -1506,7 +1565,7 @@ describe('KimiTUI message flow', () => {
     });
     const picker = driver.state.editorContainer.children[0] as {
       handleInput(data: string): void;
-      render(width: number): string[];
+      render(width: number): readonly string[];
     };
     const output = stripSgr(picker.render(40).join(' ')).replaceAll(/\s+/g, ' ');
     expect(output).toContain('Session in use');
@@ -1528,7 +1587,7 @@ describe('KimiTUI message flow', () => {
     const takeOverLock = vi.fn(async () => {});
     const session = makeSession({ prompt, takeOverLock });
     const { driver } = await makeDriver(session);
-    type Picker = { handleInput(data: string): void; render(width: number): string[] };
+    type Picker = { handleInput(data: string): void; render(width: number): readonly string[] };
     const picker = (): Picker => driver.state.editorContainer.children[0] as Picker;
 
     driver.handleUserInput('hello');
@@ -1577,7 +1636,7 @@ describe('KimiTUI message flow', () => {
     await (
       driver as unknown as { refreshSkillCommands(s: unknown): Promise<void> }
     ).refreshSkillCommands(session);
-    type Picker = { handleInput(data: string): void; render(width: number): string[] };
+    type Picker = { handleInput(data: string): void; render(width: number): readonly string[] };
     const picker = (): Picker => driver.state.editorContainer.children[0] as Picker;
 
     (
@@ -7783,7 +7842,7 @@ command = "vim"
 
   describe('steer-draft delivery', () => {
     const occupied = (): KimiError => new KimiError(ErrorCodes.SESSION_OCCUPIED, 'in use');
-    type Picker = { handleInput(data: string): void; render(width: number): string[] };
+    type Picker = { handleInput(data: string): void; render(width: number): readonly string[] };
     const picker = (driver: MessageDriver): Picker => driver.state.editorContainer.children[0] as Picker;
     const userEntries = (driver: MessageDriver) =>
       driver.state.transcriptEntries.filter((entry) => entry.kind === 'user');
@@ -9936,6 +9995,174 @@ capabilities = ["image_in", "video_in"]
     }
   });
 
+  describe('when a step stream is cut and retried', () => {
+    async function makeStreamingDriver() {
+      const { driver } = await makeDriver();
+      const emit = (event: Record<string, unknown>): void => {
+        driver.sessionEventHandler.handleEvent(
+          { agentId: 'main', sessionId: 'ses-1', turnId: 1, ...event } as Event,
+          vi.fn(),
+        );
+      };
+      const transcript = (): string => stripSgr(renderTranscript(driver));
+      const count = (type: abstract new (...args: never[]) => unknown): number =>
+        driver.state.transcriptContainer.children.filter((child) => child instanceof type).length;
+      const replies = (): string[] =>
+        driver.state.transcriptEntries.filter((entry) => entry.kind === 'assistant').map((entry) => entry.content);
+      return { driver, emit, transcript, count, replies };
+    }
+
+    function retryStep(emit: (event: Record<string, unknown>) => void, step: number, stepId: string): void {
+      emit({ type: 'turn.step.stream_reset', step, stepId });
+      emit({
+        type: 'turn.step.retrying',
+        step,
+        failedAttempt: 1,
+        nextAttempt: 2,
+        maxAttempts: 3,
+        delayMs: 0,
+        errorName: 'APIConnectionError',
+        errorMessage: 'stream ended early',
+      });
+      emit({ type: 'turn.step.started', step, stepId });
+    }
+
+    it('keeps only the retried reply', async () => {
+      vi.useFakeTimers();
+      try {
+        const { emit, transcript, count, replies } = await makeStreamingDriver();
+        emit({ type: 'turn.started', origin: { kind: 'user' } });
+        emit({ type: 'turn.step.started', step: 1, stepId: 'step-1' });
+        emit({ type: 'thinking.delta', delta: 'Planning the draft.' });
+        emit({ type: 'assistant.delta', delta: 'Draft answer ' });
+        emit({ type: 'assistant.delta', delta: 'that gets cut' });
+        await vi.runOnlyPendingTimersAsync();
+        expect(transcript()).toContain('Draft answer that gets cut');
+        expect(count(ThinkingComponent)).toBe(1);
+
+        retryStep(emit, 1, 'step-1');
+        emit({ type: 'assistant.delta', delta: 'Final answer after the retry.' });
+        emit({ type: 'turn.step.completed', step: 1, stepId: 'step-1' });
+        emit({ type: 'turn.ended', reason: 'completed' });
+
+        expect(transcript()).toContain('Final answer after the retry.');
+        expect(transcript()).not.toContain('Draft answer');
+        expect(count(ThinkingComponent)).toBe(0);
+        expect(count(AssistantMessageComponent)).toBe(1);
+        expect(replies()).toEqual(['Final answer after the retry.']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('drops a tool call the cut stream was still writing', async () => {
+      vi.useFakeTimers();
+      try {
+        const { driver, emit, transcript, count } = await makeStreamingDriver();
+        emit({ type: 'turn.started', origin: { kind: 'user' } });
+        emit({ type: 'turn.step.started', step: 1, stepId: 'step-1' });
+        emit({ type: 'assistant.delta', delta: 'Writing the notes.' });
+        const cutCall = 'call_cut';
+        assert(isToolCallId(cutCall));
+        emit({ type: 'tool.call.delta', toolCallId: cutCall, name: 'Write', argumentsPart: '{"path":"notes.md"' });
+        await vi.runOnlyPendingTimersAsync();
+        expect(count(ToolCallComponent)).toBe(1);
+        expect(driver.streamingUI.timeline.call(cutCall)).toBeDefined();
+
+        retryStep(emit, 1, 'step-1');
+        emit({ type: 'assistant.delta', delta: 'Nothing to write after all.' });
+        emit({ type: 'turn.step.completed', step: 1, stepId: 'step-1' });
+        emit({ type: 'turn.ended', reason: 'completed' });
+
+        expect(transcript()).toContain('Nothing to write after all.');
+        expect(transcript()).not.toContain('Writing the notes.');
+        expect(transcript()).not.toContain('notes.md');
+        expect(count(ToolCallComponent)).toBe(0);
+        expect(driver.streamingUI.timeline.call(cutCall)).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('drops reads the cut stream had already grouped', async () => {
+      vi.useFakeTimers();
+      try {
+        const { emit, transcript, count } = await makeStreamingDriver();
+        emit({ type: 'turn.started', origin: { kind: 'user' } });
+        emit({ type: 'turn.step.started', step: 1, stepId: 'step-1' });
+        emit({ type: 'tool.call.delta', toolCallId: 'call_read_a', name: 'Read', argumentsPart: '{"path":"first.txt"}' });
+        await vi.runOnlyPendingTimersAsync();
+        emit({ type: 'tool.call.delta', toolCallId: 'call_read_b', name: 'Read', argumentsPart: '{"path":"second.txt"}' });
+        await vi.runOnlyPendingTimersAsync();
+        expect(count(ReadGroupComponent)).toBe(1);
+
+        retryStep(emit, 1, 'step-1');
+        emit({ type: 'assistant.delta', delta: 'No files needed.' });
+        emit({ type: 'turn.step.completed', step: 1, stepId: 'step-1' });
+        emit({ type: 'turn.ended', reason: 'completed' });
+
+        expect(transcript()).toContain('No files needed.');
+        expect(transcript()).not.toContain('first.txt');
+        expect(transcript()).not.toContain('second.txt');
+        expect(count(ReadGroupComponent)).toBe(0);
+        expect(count(ToolCallComponent)).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps what earlier steps showed', async () => {
+      vi.useFakeTimers();
+      try {
+        const { emit, transcript, count, replies } = await makeStreamingDriver();
+        emit({ type: 'turn.started', origin: { kind: 'user' } });
+        emit({ type: 'turn.step.started', step: 1, stepId: 'step-1' });
+        emit({ type: 'thinking.delta', delta: 'Look at the file first.' });
+        emit({ type: 'assistant.delta', delta: 'Checking the file.' });
+        emit({ type: 'tool.call.delta', toolCallId: 'call_read', name: 'Read', argumentsPart: '{"path":"a.txt"}' });
+        emit({ type: 'tool.call.started', toolCallId: 'call_read', name: 'Read', args: { path: 'a.txt' } });
+        emit({ type: 'tool.result', toolCallId: 'call_read', output: 'hello' });
+        emit({ type: 'turn.step.completed', step: 1, stepId: 'step-1' });
+        emit({ type: 'turn.step.started', step: 2, stepId: 'step-2' });
+        emit({ type: 'assistant.delta', delta: 'It says hel' });
+        await vi.runOnlyPendingTimersAsync();
+
+        retryStep(emit, 2, 'step-2');
+        emit({ type: 'assistant.delta', delta: 'It says hello.' });
+        emit({ type: 'turn.step.completed', step: 2, stepId: 'step-2' });
+        emit({ type: 'turn.ended', reason: 'completed' });
+
+        expect(transcript()).toContain('Checking the file.');
+        expect(transcript()).toContain('It says hello.');
+        expect(replies()).toEqual(['Checking the file.', 'It says hello.']);
+        expect(count(ThinkingComponent)).toBe(1);
+        expect(count(ToolCallComponent)).toBe(1);
+        expect(count(AssistantMessageComponent)).toBe(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('ignores a reset for another step', async () => {
+      vi.useFakeTimers();
+      try {
+        const { emit, transcript, replies } = await makeStreamingDriver();
+        emit({ type: 'turn.started', origin: { kind: 'user' } });
+        emit({ type: 'turn.step.started', step: 2, stepId: 'step-2' });
+        emit({ type: 'assistant.delta', delta: 'Still streaming.' });
+        await vi.runOnlyPendingTimersAsync();
+
+        emit({ type: 'turn.step.stream_reset', step: 1, stepId: 'step-1' });
+        await vi.runOnlyPendingTimersAsync();
+
+        expect(transcript()).toContain('Still streaming.');
+        expect(replies()).toEqual(['Still streaming.']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   it('flushes pending assistant deltas before turn completion', async () => {
     vi.useFakeTimers();
     try {
@@ -10002,6 +10229,62 @@ capabilities = ["image_in", "video_in"]
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  describe('Auto Review progress on the tool card', () => {
+    async function startReview() {
+      const { driver } = await makeDriver();
+      driver.streamingUI.setTurnId('1');
+      driver.streamingUI.setStep(1);
+      const emit = (event: object): void => {
+        driver.sessionEventHandler.handleEvent(
+          { agentId: 'main', sessionId: 'ses-1', turnId: 1, toolCallId: 'call_bash', ...event } as Event,
+          vi.fn(),
+        );
+      };
+      vi.useFakeTimers();
+      emit({ type: 'tool.call.delta', name: 'Bash', argumentsPart: '{"command":"echo hi"}' });
+      emit({ type: 'auto_review.started', toolName: 'Bash' });
+      return {
+        reviewing: () => stripSgr(renderTranscript(driver)).includes('Reviewing'),
+        decide: () => {
+          emit({
+            type: 'auto_review.decision',
+            toolName: 'Bash',
+            triggerPolicy: 'fallback-ask',
+            model: 'review-model',
+            decision: 'allow',
+            risk: 'low',
+            durationMs: 1,
+          });
+          emit({ type: 'tool.call.started', name: 'Bash', args: { command: 'echo hi' } });
+        },
+      };
+    }
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('appears once a review lasts 3 seconds and clears when the decision arrives', async () => {
+      const review = await startReview();
+      await vi.advanceTimersByTimeAsync(2_999);
+      expect(review.reviewing()).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(review.reviewing()).toBe(true);
+
+      review.decide();
+      expect(review.reviewing()).toBe(false);
+    });
+
+    it('never appears for a review decided within 3 seconds', async () => {
+      const review = await startReview();
+      await vi.advanceTimersByTimeAsync(2_000);
+      review.decide();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(review.reviewing()).toBe(false);
+    });
   });
 
   it('cancels manual compaction from the editor', async () => {

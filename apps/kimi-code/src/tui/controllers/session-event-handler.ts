@@ -29,6 +29,7 @@ import type {
   TurnStepInterruptedEvent,
   TurnStepRetryingEvent,
   TurnStepStartedEvent,
+  TurnStepStreamResetEvent,
   WarningEvent,
 } from '@moonshot-ai/kimi-code-sdk';
 
@@ -189,6 +190,7 @@ export class SessionEventHandler {
   private goalCompletionAwaitingClear = false;
   private goalCompletionTurnEnded = false;
   private currentTurnHasAssistantText = false;
+  private turnHadAssistantTextBeforeStep = false;
   private pluginCommandTurns: Map<string, string> = new Map();
   private pluginMcpToolsUsedInTurn: Set<string> = new Set();
   private pendingModelBlockedFallback: GoalChange | undefined;
@@ -213,6 +215,7 @@ export class SessionEventHandler {
     this.goalCompletionAwaitingClear = false;
     this.goalCompletionTurnEnded = false;
     this.currentTurnHasAssistantText = false;
+    this.turnHadAssistantTextBeforeStep = false;
     this.pluginCommandTurns.clear();
     this.pluginMcpToolsUsedInTurn.clear();
     this.pendingModelBlockedFallback = undefined;
@@ -323,6 +326,7 @@ export class SessionEventHandler {
       case 'turn.step.interrupted': this.handleStepInterrupted(event); break;
       case 'turn.step.completed': this.handleStepCompleted(event); break;
       case 'turn.step.retrying': this.handleStepRetrying(event); break;
+      case 'turn.step.stream_reset': this.handleStepStreamReset(event); break;
       case 'tool.updated': this.handleToolUpdated(event); break;
       case 'shell.output': this.host.handleShellOutput(event); break;
       case 'shell.started': this.host.handleShellStarted(event); break;
@@ -332,6 +336,8 @@ export class SessionEventHandler {
       case 'tool.call.started': this.handleToolCall(event); break;
       case 'tool.call.delta': this.handleToolCallDelta(event); break;
       case 'tool.result': this.handleToolResult(event); break;
+      case 'auto_review.started': this.setToolAutoReviewing(event.toolCallId, event.toolName, true); break;
+      case 'auto_review.decision': this.setToolAutoReviewing(event.toolCallId, event.toolName, false); break;
       case 'agent.status.updated': this.handleStatusUpdate(event); break;
       case 'session.meta.updated': this.handleSessionMetaChanged(event); break;
       case 'goal.updated': this.handleGoalUpdated(event); break;
@@ -479,6 +485,7 @@ export class SessionEventHandler {
     this.host.streamingUI.timeline.abandonUnstarted();
     this.host.streamingUI.flushNow();
     this.host.streamingUI.setStep(event.step);
+    this.turnHadAssistantTextBeforeStep = this.currentTurnHasAssistantText;
     this.host.streamingUI.resetToolUi();
     this.host.streamingUI.finalizeLiveTextBuffers('waiting');
     this.host.patchLivePane({
@@ -522,6 +529,12 @@ export class SessionEventHandler {
       ? 'If this limit is wrong for your model, set `max_output_size` on the model alias in your kimi-code config.'
       : undefined;
     this.host.showNotice(title, detail);
+  }
+
+  private handleStepStreamReset(event: TurnStepStreamResetEvent): void {
+    if (event.step !== this.host.streamingUI.getTurnContext().step) return;
+    this.host.streamingUI.discardStepOutput();
+    this.currentTurnHasAssistantText = this.turnHadAssistantTextBeforeStep;
   }
 
   private handleStepRetrying(event: TurnStepRetryingEvent): void {
@@ -696,6 +709,20 @@ export class SessionEventHandler {
       pendingApproval: null,
       pendingQuestion: null,
     });
+  }
+
+  private setToolAutoReviewing(toolCallId: string, toolName: string, reviewing: boolean): void {
+    const { streamingUI } = this.host;
+    if (isToolCallId(toolCallId)) {
+      if (reviewing) {
+        streamingUI.timeline.reviewStarted(toolCallId, toolName);
+        if (streamingUI.getToolComponent(toolCallId) === undefined) {
+          streamingUI.accumulateToolCallDelta(toolCallId, toolName, undefined);
+        }
+      } else streamingUI.timeline.reviewEnded(toolCallId);
+    }
+    streamingUI.flushNow();
+    streamingUI.getToolComponent(toolCallId)?.setAutoReviewing(reviewing);
   }
 
   private handleToolCallDelta(event: ToolCallDeltaEvent): void {

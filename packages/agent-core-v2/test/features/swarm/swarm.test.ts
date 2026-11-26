@@ -10,7 +10,7 @@ import { TestInstantiationService } from '#/_base/di/test';
 import { Event } from '#/_base/event';
 import { ILogService } from '#/_base/log/log';
 import { Error2, ErrorCodes } from '#/errors';
-import { IModelCatalog, type Model } from '#/llm-adapter/model/catalog';
+import { type Model } from '#/provider-catalog/model/catalog';
 import { stubLog } from '../../_base/log/stubs';
 import { stubAgentContext } from '../../agent/agentContext/stubs';
 import type { ContextInjectionProvider, ContextInjectionResult } from '#/features/reminder/types';
@@ -37,7 +37,6 @@ import { IProjectInstanceManager } from '#/project/projectInstance/projectInstan
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
 import { IAgentToolApprovalService } from '#/agent/toolApproval/toolApproval';
-import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import type {
   BeforeExecuteDecision,
@@ -72,6 +71,7 @@ import {
 import { stubLoopWithHooks, type StubLoop } from '../../agent/loop/stubs';
 import { stubToolExecutorEvents, type ToolExecutorEventStubs } from '../../agent/toolExecutor/stubs';
 import { createTestAgent } from '../../harness';
+import { IProviderCatalogService } from '#/provider-catalog/providerCatalogService';
 
 const signal = new AbortController().signal;
 
@@ -257,7 +257,7 @@ function realSubagents(
       }
       return { id: alias } as Model;
     },
-  } as unknown as IModelCatalog;
+  } as unknown as IProviderCatalogService;
   const sessionContext = { _serviceBrand: undefined, cwd: '/repo' } as unknown as ISessionContext;
   return new SessionSubagentService(
     agentLifecycle,
@@ -277,7 +277,6 @@ describe('AgentSwarmService', () => {
   let permissionGateRan: boolean;
   let formatDenyMessage: Mock<(message: string) => string>;
   let telemetryTrack2: Mock<(event: string, properties?: unknown) => void>;
-  let agentSwarmActive: boolean;
 
   beforeEach(() => {
     disposables = new DisposableStore();
@@ -352,10 +351,6 @@ describe('AgentSwarmService', () => {
     executorEvents = stubToolExecutorEvents();
     permissionGateRan = false;
     ix.stub(IAgentToolExecutorService, executorEvents.executor);
-    agentSwarmActive = true;
-    ix.stub(IAgentToolPolicyService, {
-      isToolActive: (name: string) => name !== 'AgentSwarm' || agentSwarmActive,
-    } as unknown as IAgentToolPolicyService);
     formatDenyMessage = vi.fn((message: string) => message);
     ix.stub(IAgentToolApprovalService, { formatDenyMessage });
     telemetryTrack2 = vi.fn();
@@ -394,16 +389,6 @@ describe('AgentSwarmService', () => {
     }
     return executorEvents.fireBeforeExecute(ctx);
   }
-
-  it('rejects entry when AgentSwarm is unavailable', () => {
-    agentSwarmActive = false;
-    const swarm = ix.get(IAgentSwarmService);
-
-    expect(() => {
-      swarm.enter('manual');
-    }).toThrow('Swarm mode requires the AgentSwarm tool');
-    expect(swarm.isActive).toBe(false);
-  });
 
   it('enter / exit toggle isActive and emit agent.status.updated via wire', () => {
     const swarm = ix.get(IAgentSwarmService);

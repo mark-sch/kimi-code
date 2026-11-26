@@ -193,6 +193,7 @@ export const toolCallItemSchema = z.object({
   ...itemFields,
   name: z.string(),
   stage: toolStageSchema.optional(),
+  auto_review: z.boolean().optional(),
   input: z.unknown().optional(),
   input_text: z.string().optional(),
   display: z.unknown().optional(),
@@ -247,6 +248,7 @@ export const compactionItemSchema = z.object({
   tokens_after: z.number().nonnegative().optional(),
   compacted_count: z.number().int().nonnegative().optional(),
   summary: z.string().optional(),
+  error: errorInfoSchema.optional(),
 });
 export type CompactionItem = z.infer<typeof compactionItemSchema>;
 

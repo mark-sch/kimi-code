@@ -161,6 +161,7 @@ export interface ToolCallItem extends ConversationItemBase {
   readonly type: 'tool_call';
   readonly name: string;
   readonly stage?: 'input' | 'awaiting_approval' | 'executing';
+  readonly auto_review?: boolean;
   readonly input?: unknown;
   readonly input_text?: string;
   readonly fields?: Readonly<Record<string, unknown>>;
@@ -208,6 +209,7 @@ export interface CompactionItem extends ConversationItemBase {
   readonly tokens_after?: number;
   readonly compacted_count?: number;
   readonly summary?: string;
+  readonly error?: ConversationError;
 }
 
 export interface ForkBoundaryItem extends ConversationItemBase {

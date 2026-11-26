@@ -27,7 +27,6 @@ import {
 import { IAgentLoopService } from '#/agent/loop/loop';
 import { readUserPermissionRules } from '#/agent/permissionRules/configSection';
 import { IProjectPermissionRulesService } from '#/agent/permissionRules/projectPermissionRules';
-import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
 import { IAgentPlanService } from '#/features/plan/plan';
 import { LifecycleScope } from '#/app/scopes';
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
@@ -94,8 +93,7 @@ import {
 import { normalizeLegacyTurnSteerRecords } from '#/wire/human';
 import { repairWireJournal } from '#/wire/repair';
 import { flattenChain } from '#/wire/tree/index';
-import { IModelService } from '#/llm-adapter/model/model';
-import { IProviderService } from '#/llm-adapter/provider/provider';
+
 import { IProjectContext } from '#/project/projectContext/projectContext';
 import { IProjectTrust } from '#/project/projectTrust/projectTrust';
 import { IUserAgentProfileLoader } from '#/project/projectAgentProfileLoader/userAgentProfileLoader';
@@ -127,6 +125,7 @@ import {
   type SessionWillCreateEvent,
   ISessionLifecycleService,
 } from './sessionLifecycle';
+import { IProviderCatalogService } from '#/provider-catalog/providerCatalogService';
 
 type MaterializeSessionOptions = Omit<CreateSessionOptions, 'sessionId'> & {
   readonly sessionId: string;
@@ -204,8 +203,8 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
     @IPluginAgentProfileLoader
     private readonly pluginAgentProfileLoader: IPluginAgentProfileLoader,
     private readonly acquireMcp: (workDir?: string) => Promise<ProgramMcpLease>,
-    @IModelService private readonly models: IModelService,
-    @IProviderService private readonly providers: IProviderService,
+    @IProviderCatalogService private readonly models: IProviderCatalogService,
+    @IProviderCatalogService private readonly providers: IProviderCatalogService,
     private readonly environments: IEnvironmentService,
     private readonly trust: IProjectTrust,
     private readonly acquireWorkdir: (environmentId: string, cwd: string, followsPrimary?: boolean, launchDir?: string) => Promise<ProgramWorkdir>,
@@ -262,9 +261,7 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
         if (planHandle === undefined) {
           throw new Error2(ErrorCodes.AGENT_NOT_FOUND, 'Main agent was not found');
         }
-        if (planHandle.accessor.get(IAgentToolPolicyService).isToolActive('ExitPlanMode')) {
-          await planHandle.accessor.get(IAgentPlanService).enter();
-        }
+        await planHandle.accessor.get(IAgentPlanService).enter();
       }
       await opts.prepare?.(handle);
       await this.appendSessionIndexEntry(sessionId, workDir);
@@ -340,6 +337,7 @@ export class SessionLifecycleService extends Disposable implements ISessionLifec
               environmentId: environment?.environmentId ?? LOCAL_ENVIRONMENT_ID,
               cwd: environment?.cwd,
               fs: workdir.fs,
+              git: workdir.git,
             }],
             ...sessionEphemeralMcpServersSeed(opts.mcpServers ?? {}),
           ],
